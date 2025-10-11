@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -28,7 +29,7 @@ def is_youtube_url(text: str) -> bool:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message) -> None:
     """Handle /start command"""
     welcome_text = (
         "👋 Привет! Я бот для конвертации YouTube видео в MP3.\n\n"
@@ -44,7 +45,7 @@ async def cmd_start(message: Message):
 
 
 @router.message(F.text)
-async def handle_message(message: Message, youtube_service: YouTubeService):
+async def handle_message(message: Message, youtube_service: YouTubeService) -> None:
     """Handle text messages with YouTube URLs"""
     if not message.text:
         return
@@ -57,6 +58,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService):
         return
 
     url = message.text.strip()
+    mp3_file = None
 
     try:
         # Send processing message
@@ -66,16 +68,33 @@ async def handle_message(message: Message, youtube_service: YouTubeService):
         is_valid, duration = youtube_service.check_duration(url)
 
         if not is_valid:
-            minutes = duration // 60 if duration else 0
-            await status_msg.edit_text(
-                f"❌ Видео слишком длинное ({minutes} мин).\n"
-                f"Максимальная длительность: 30 минут."
-            )
+            if duration:
+                minutes = duration // 60
+                await status_msg.edit_text(
+                    f"❌ Видео слишком длинное ({minutes} мин).\n"
+                    f"Максимальная длительность: 30 минут."
+                )
+            else:
+                await status_msg.edit_text(
+                    "❌ Не удалось определить длительность видео.\n"
+                    "Возможно, это прямая трансляция или премьера."
+                )
             return
 
         # Download and convert
         await status_msg.edit_text("⏳ Загружаю и конвертирую видео...")
         mp3_file = youtube_service.download_and_convert(url)
+
+        # Check file size (Telegram limit is 50MB)
+        file_size = mp3_file.stat().st_size
+        max_size = 50 * 1024 * 1024  # 50MB in bytes
+
+        if file_size > max_size:
+            await status_msg.edit_text(
+                f"❌ MP3 файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
+                f"Максимальный размер: 50 MB."
+            )
+            return
 
         # Send MP3 file
         await status_msg.edit_text("⏳ Отправляю MP3 файл...")
@@ -86,9 +105,14 @@ async def handle_message(message: Message, youtube_service: YouTubeService):
             caption="✅ Готово! Вот твой MP3 файл."
         )
 
-        # Cleanup
-        youtube_service.cleanup_file(mp3_file)
-        await status_msg.delete()
+        # Wait a bit to ensure Telegram has read the file
+        await asyncio.sleep(1)
+
+        # Try to delete status message
+        try:
+            await status_msg.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete status message: {e}")
 
         logger.info(f"Successfully processed video for user {message.from_user.id}")
 
@@ -98,3 +122,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService):
             "❌ Произошла ошибка при обработке видео.\n"
             "Пожалуйста, попробуй другую ссылку или повтори попытку позже."
         )
+    finally:
+        # Always cleanup the file
+        if mp3_file:
+            youtube_service.cleanup_file(mp3_file)

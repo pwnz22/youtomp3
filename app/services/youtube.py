@@ -1,5 +1,5 @@
-import os
 import logging
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -45,7 +45,12 @@ class YouTubeService:
         """
         try:
             info = self._get_video_info(url)
-            duration = info.get('duration', 0)
+            duration = info.get('duration')
+
+            # Handle None duration (livestreams, premieres)
+            if duration is None:
+                logger.warning("Video has no duration (might be a livestream)")
+                return False, None
 
             if duration > self.max_duration:
                 return False, duration
@@ -69,6 +74,9 @@ class YouTubeService:
             Exception: If download or conversion fails
         """
         try:
+            # Generate unique filename to avoid conflicts
+            unique_id = uuid.uuid4().hex[:8]
+
             # Configure yt-dlp options
             ydl_opts = {
                 'format': 'bestaudio/best',
@@ -77,7 +85,7 @@ class YouTubeService:
                     'preferredcodec': 'mp3',
                     'preferredquality': self.audio_quality,
                 }],
-                'outtmpl': str(self.download_dir / '%(title)s.%(ext)s'),
+                'outtmpl': str(self.download_dir / f'{unique_id}_%(title)s.%(ext)s'),
                 'quiet': False,
                 'no_warnings': False,
             }
