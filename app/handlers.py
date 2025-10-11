@@ -113,12 +113,11 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         # Wait a bit to ensure Telegram has read the file
         await asyncio.sleep(1)
 
-        # Try to delete messages
+        # Delete status message
         try:
             await status_msg.delete()
-            await message.delete()
         except Exception as e:
-            logger.warning(f"Could not delete messages: {e}")
+            logger.warning(f"Could not delete status message: {e}")
 
         logger.info(f"Successfully processed video for user {message.from_user.id}")
 
