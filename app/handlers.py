@@ -38,12 +38,12 @@ def is_youtube_url(text: str) -> bool:
 async def cmd_start(message: Message) -> None:
     """Handle /start command"""
     welcome_text = (
-        "👋 Привет! Я бот для конвертации YouTube видео в MP3.\n\n"
+        "👋 Привет! Я бот для скачивания аудио из YouTube.\n\n"
         "📝 Как использовать:\n"
-        "Просто отправь мне ссылку на YouTube видео, и я конвертирую его в MP3.\n\n"
+        "Просто отправь мне ссылку на YouTube видео, и я скачаю аудио.\n\n"
         "⚠️ Ограничения:\n"
         "• Максимальная длительность видео: 30 минут\n"
-        "• Качество аудио: 320 kbps\n"
+        "• Формат: M4A (высокое качество)\n"
         "• Только одиночные видео (плейлисты не поддерживаются)\n\n"
         "Отправь ссылку, чтобы начать!"
     )
@@ -64,7 +64,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         return
 
     url = message.text.strip()
-    mp3_file = None
+    audio_file_path = None
 
     try:
         # Send processing message
@@ -87,35 +87,38 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
                 )
             return
 
-        # Download and convert
-        await status_msg.edit_text("⏳ Загружаю и конвертирую видео...")
-        mp3_file, video_title = youtube_service.download_and_convert(url)
+        # Download audio
+        await status_msg.edit_text("⏳ Загружаю аудио...")
+        audio_file_path, video_title = youtube_service.download_and_convert(url)
 
         # Check file size (Telegram limit is 50MB)
-        file_size = mp3_file.stat().st_size
+        file_size = audio_file_path.stat().st_size
         max_size = 50 * 1024 * 1024  # 50MB in bytes
 
         if file_size > max_size:
             await status_msg.edit_text(
-                f"❌ MP3 файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
+                f"❌ Аудио файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
                 f"Максимальный размер: 50 MB."
             )
             return
 
-        # Send MP3 file
-        await status_msg.edit_text("⏳ Отправляю MP3 файл...")
+        # Send audio file
+        await status_msg.edit_text("⏳ Отправляю аудио...")
 
-        audio_file = FSInputFile(mp3_file, filename=f"{video_title}.mp3")
+        # Get file extension
+        file_ext = audio_file_path.suffix
+        audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
         await message.answer_audio(audio=audio_file, title=video_title)
 
         # Wait a bit to ensure Telegram has read the file
         await asyncio.sleep(1)
 
-        # Try to delete status message
+        # Try to delete messages
         try:
             await status_msg.delete()
+            await message.delete()
         except Exception as e:
-            logger.warning(f"Could not delete status message: {e}")
+            logger.warning(f"Could not delete messages: {e}")
 
         logger.info(f"Successfully processed video for user {message.from_user.id}")
 
@@ -148,5 +151,5 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         )
     finally:
         # Always cleanup the file
-        if mp3_file:
-            youtube_service.cleanup_file(mp3_file)
+        if audio_file_path:
+            youtube_service.cleanup_file(audio_file_path)

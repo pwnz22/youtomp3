@@ -31,15 +31,15 @@ class VideoDownloadError(YouTubeServiceError):
 
 
 class YouTubeService:
-    """Service for downloading and converting YouTube videos to MP3"""
+    """Service for downloading audio from YouTube videos"""
 
-    def __init__(self, max_duration: int = 1800, audio_quality: str = "320"):
+    def __init__(self, max_duration: int = 1800, audio_quality: str = "best"):
         """
         Initialize YouTube service
 
         Args:
             max_duration: Maximum video duration in seconds (default: 1800 = 30 min)
-            audio_quality: Audio quality in kbps (default: 320)
+            audio_quality: Audio quality preference (default: best)
         """
         self.max_duration = max_duration
         self.audio_quality = audio_quality
@@ -101,13 +101,13 @@ class YouTubeService:
 
     def download_and_convert(self, url: str) -> tuple[Path, str]:
         """
-        Download YouTube video and convert to MP3
+        Download audio from YouTube video (without conversion)
 
         Args:
             url: YouTube video URL
 
         Returns:
-            Tuple of (Path to the downloaded MP3 file, Video title)
+            Tuple of (Path to the downloaded audio file, Video title)
 
         Raises:
             VideoUnavailableError: If video is not available
@@ -118,14 +118,9 @@ class YouTubeService:
             # Generate unique filename to avoid conflicts
             unique_id = uuid.uuid4().hex[:8]
 
-            # Configure yt-dlp options with workarounds for signature extraction issues
+            # Configure yt-dlp options - download best audio directly (no conversion)
             ydl_opts = {
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': self.audio_quality,
-                }],
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
                 'outtmpl': str(self.download_dir / f'{unique_id}_%(title)s.%(ext)s'),
                 'quiet': False,
                 'no_warnings': False,
@@ -144,24 +139,24 @@ class YouTubeService:
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Download and convert
+                # Download audio directly
                 info = ydl.extract_info(url, download=True)
 
                 # Get the output file path and title
                 filename = ydl.prepare_filename(info)
-                mp3_file = Path(filename).with_suffix('.mp3')
+                audio_file = Path(filename)
                 video_title = info.get('title', 'audio')
 
-                if not mp3_file.exists():
-                    raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
+                if not audio_file.exists():
+                    raise FileNotFoundError(f"Audio file not found: {audio_file}")
 
                 # Check if file is empty
-                if mp3_file.stat().st_size == 0:
-                    mp3_file.unlink()
+                if audio_file.stat().st_size == 0:
+                    audio_file.unlink()
                     raise VideoDownloadError("Загруженный файл пуст")
 
-                logger.info(f"Successfully converted: {mp3_file}")
-                return mp3_file, video_title
+                logger.info(f"Successfully downloaded: {audio_file}")
+                return audio_file, video_title
 
         except (VideoUnavailableError, VideoRestrictedError, VideoDownloadError):
             # Re-raise our custom exceptions
@@ -189,8 +184,8 @@ class YouTubeService:
                 logger.error(f"Download error: {e}")
                 raise VideoDownloadError("Ошибка при загрузке видео")
         except FileNotFoundError as e:
-            logger.error(f"File not found after conversion: {e}")
-            raise VideoDownloadError("Не удалось создать MP3 файл")
+            logger.error(f"File not found after download: {e}")
+            raise VideoDownloadError("Не удалось скачать аудио файл")
         except Exception as e:
             logger.error(f"Unexpected error during download: {e}")
             raise VideoDownloadError(f"Неожиданная ошибка при скачивании: {str(e)}")

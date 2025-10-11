@@ -26,8 +26,7 @@ def create_dispatcher(config: Config) -> Dispatcher:
 
     # Create YouTube service instance
     youtube_service = YouTubeService(
-        max_duration=config.max_video_duration,
-        audio_quality=config.audio_quality
+        max_duration=config.max_video_duration
     )
 
     # Pass dependencies via workflow_data
