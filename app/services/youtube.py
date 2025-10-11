@@ -4,9 +4,30 @@ from pathlib import Path
 from typing import Optional
 
 import yt_dlp
+from yt_dlp.utils import DownloadError, ExtractorError
 
 
 logger = logging.getLogger(__name__)
+
+
+class YouTubeServiceError(Exception):
+    """Base exception for YouTube service errors"""
+    pass
+
+
+class VideoUnavailableError(YouTubeServiceError):
+    """Video is unavailable, private, or deleted"""
+    pass
+
+
+class VideoRestrictedError(YouTubeServiceError):
+    """Video is age-restricted or geo-blocked"""
+    pass
+
+
+class VideoDownloadError(YouTubeServiceError):
+    """Error during video download"""
+    pass
 
 
 class YouTubeService:
@@ -42,6 +63,10 @@ class YouTubeService:
 
         Returns:
             Tuple of (is_valid, duration_in_seconds)
+
+        Raises:
+            VideoUnavailableError: If video is not available
+            VideoRestrictedError: If video is restricted
         """
         try:
             info = self._get_video_info(url)
@@ -56,9 +81,23 @@ class YouTubeService:
                 return False, duration
 
             return True, duration
+        except ExtractorError as e:
+            error_msg = str(e).lower()
+            if 'private' in error_msg or 'unavailable' in error_msg or 'deleted' in error_msg:
+                logger.error(f"Video unavailable: {e}")
+                raise VideoUnavailableError("Видео недоступно, удалено или приватное")
+            elif 'age' in error_msg or 'restricted' in error_msg or 'geo' in error_msg:
+                logger.error(f"Video restricted: {e}")
+                raise VideoRestrictedError("Видео имеет ограничения (возраст/регион)")
+            else:
+                logger.error(f"Extractor error: {e}")
+                raise VideoUnavailableError(f"Ошибка при получении информации о видео")
+        except DownloadError as e:
+            logger.error(f"Download error: {e}")
+            raise VideoUnavailableError("Не удалось получить доступ к видео")
         except Exception as e:
             logger.error(f"Error checking video duration: {e}")
-            raise
+            raise YouTubeServiceError(f"Неожиданная ошибка: {str(e)}")
 
     def download_and_convert(self, url: str) -> Path:
         """
@@ -71,7 +110,9 @@ class YouTubeService:
             Path to the downloaded MP3 file
 
         Raises:
-            Exception: If download or conversion fails
+            VideoUnavailableError: If video is not available
+            VideoRestrictedError: If video is restricted
+            VideoDownloadError: If download fails
         """
         try:
             # Generate unique filename to avoid conflicts
@@ -88,6 +129,8 @@ class YouTubeService:
                 'outtmpl': str(self.download_dir / f'{unique_id}_%(title)s.%(ext)s'),
                 'quiet': False,
                 'no_warnings': False,
+                'socket_timeout': 30,
+                'retries': 3,
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -101,12 +144,45 @@ class YouTubeService:
                 if not mp3_file.exists():
                     raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
 
+                # Check if file is empty
+                if mp3_file.stat().st_size == 0:
+                    mp3_file.unlink()
+                    raise VideoDownloadError("Загруженный файл пуст")
+
                 logger.info(f"Successfully converted: {mp3_file}")
                 return mp3_file
 
-        except Exception as e:
-            logger.error(f"Error downloading/converting video: {e}")
+        except (VideoUnavailableError, VideoRestrictedError, VideoDownloadError):
+            # Re-raise our custom exceptions
             raise
+        except ExtractorError as e:
+            error_msg = str(e).lower()
+            if 'private' in error_msg or 'unavailable' in error_msg or 'deleted' in error_msg:
+                logger.error(f"Video unavailable during download: {e}")
+                raise VideoUnavailableError("Видео недоступно, удалено или приватное")
+            elif 'age' in error_msg or 'restricted' in error_msg or 'geo' in error_msg:
+                logger.error(f"Video restricted during download: {e}")
+                raise VideoRestrictedError("Видео имеет ограничения по возрасту или региону")
+            elif 'empty' in error_msg or 'fragment' in error_msg:
+                logger.error(f"Download incomplete: {e}")
+                raise VideoDownloadError("Не удалось скачать видео полностью. Попробуйте другое видео.")
+            else:
+                logger.error(f"Extractor error during download: {e}")
+                raise VideoDownloadError(f"Ошибка при скачивании видео")
+        except DownloadError as e:
+            error_msg = str(e).lower()
+            if 'empty' in error_msg:
+                logger.error(f"Empty file error: {e}")
+                raise VideoDownloadError("Загруженный файл пуст. Возможно, видео защищено или недоступно.")
+            else:
+                logger.error(f"Download error: {e}")
+                raise VideoDownloadError("Ошибка при загрузке видео")
+        except FileNotFoundError as e:
+            logger.error(f"File not found after conversion: {e}")
+            raise VideoDownloadError("Не удалось создать MP3 файл")
+        except Exception as e:
+            logger.error(f"Unexpected error during download: {e}")
+            raise VideoDownloadError(f"Неожиданная ошибка при скачивании: {str(e)}")
 
     def cleanup_file(self, file_path: Path) -> None:
         """Delete the downloaded file"""

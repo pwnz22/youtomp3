@@ -7,7 +7,13 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, FSInputFile
 
-from app.services.youtube import YouTubeService
+from app.services.youtube import (
+    YouTubeService,
+    VideoUnavailableError,
+    VideoRestrictedError,
+    VideoDownloadError,
+    YouTubeServiceError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -116,10 +122,31 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
 
         logger.info(f"Successfully processed video for user {message.from_user.id}")
 
-    except Exception as e:
-        logger.error(f"Error processing video: {e}")
+    except VideoUnavailableError as e:
+        logger.warning(f"Video unavailable for user {message.from_user.id}: {e}")
+        await message.answer(f"❌ {str(e)}")
+    except VideoRestrictedError as e:
+        logger.warning(f"Video restricted for user {message.from_user.id}: {e}")
         await message.answer(
-            "❌ Произошла ошибка при обработке видео.\n"
+            f"❌ {str(e)}\n\n"
+            "💡 Попробуйте другое видео без ограничений."
+        )
+    except VideoDownloadError as e:
+        logger.warning(f"Video download error for user {message.from_user.id}: {e}")
+        await message.answer(
+            f"❌ {str(e)}\n\n"
+            "💡 Рекомендации:\n"
+            "• Попробуйте другое видео\n"
+            "• Убедитесь, что видео доступно публично\n"
+            "• Проверьте, что видео не защищено авторскими правами"
+        )
+    except YouTubeServiceError as e:
+        logger.error(f"YouTube service error for user {message.from_user.id}: {e}")
+        await message.answer(f"❌ {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error processing video for user {message.from_user.id}: {e}")
+        await message.answer(
+            "❌ Произошла непредвиденная ошибка.\n"
             "Пожалуйста, попробуй другую ссылку или повтори попытку позже."
         )
     finally:
