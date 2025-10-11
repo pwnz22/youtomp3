@@ -118,9 +118,13 @@ class YouTubeService:
             # Generate unique filename to avoid conflicts
             unique_id = uuid.uuid4().hex[:8]
 
-            # Configure yt-dlp options - download best audio directly (no conversion)
+            # Configure yt-dlp options - extract audio without re-encoding
             ydl_opts = {
-                'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'nopostoverwrites': False,
+                }],
                 'outtmpl': str(self.download_dir / f'{unique_id}_%(title)s.%(ext)s'),
                 'quiet': False,
                 'no_warnings': False,
@@ -144,12 +148,21 @@ class YouTubeService:
 
                 # Get the output file path, title, and duration
                 filename = ydl.prepare_filename(info)
-                audio_file = Path(filename)
+                # After FFmpegExtractAudio, extension changes to audio format
+                base_path = Path(filename).with_suffix('')
                 video_title = info.get('title', 'audio')
                 duration = info.get('duration', 0)
 
-                if not audio_file.exists():
-                    raise FileNotFoundError(f"Audio file not found: {audio_file}")
+                # Find the actual audio file (could be .m4a, .opus, .webm, etc)
+                audio_file = None
+                for ext in ['.m4a', '.opus', '.webm', '.mp3', '.ogg']:
+                    potential_file = base_path.with_suffix(ext)
+                    if potential_file.exists():
+                        audio_file = potential_file
+                        break
+
+                if not audio_file or not audio_file.exists():
+                    raise FileNotFoundError(f"Audio file not found: {base_path}")
 
                 # Check if file is empty
                 if audio_file.stat().st_size == 0:
