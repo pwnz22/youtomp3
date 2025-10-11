@@ -126,6 +126,7 @@ class YouTubeService:
                     'nopostoverwrites': False,
                 }],
                 'outtmpl': str(self.download_dir / f'{unique_id}_%(title)s.%(ext)s'),
+                'keepvideo': False,  # Delete original video/container after extracting audio
                 'quiet': False,
                 'no_warnings': False,
                 'socket_timeout': 30,
