@@ -30,8 +30,8 @@ def create_dispatcher(config: Config) -> Dispatcher:
         audio_quality=config.audio_quality
     )
 
-    # Register router with dependency injection
-    router["youtube_service"] = youtube_service
+    # Pass dependencies via workflow_data
+    dp.workflow_data.update({"youtube_service": youtube_service})
     dp.include_router(router)
 
     return dp
