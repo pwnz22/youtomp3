@@ -118,7 +118,7 @@ class YouTubeService:
             # Generate unique filename to avoid conflicts
             unique_id = uuid.uuid4().hex[:8]
 
-            # Configure yt-dlp options
+            # Configure yt-dlp options with workarounds for signature extraction issues
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'postprocessors': [{
@@ -131,6 +131,16 @@ class YouTubeService:
                 'no_warnings': False,
                 'socket_timeout': 30,
                 'retries': 3,
+                'fragment_retries': 3,
+                'skip_unavailable_fragments': True,
+                'nocheckcertificate': True,
+                'prefer_free_formats': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'web'],
+                        'player_skip': ['webpage', 'configs'],
+                    }
+                },
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
