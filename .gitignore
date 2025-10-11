@@ -40,3 +40,9 @@ downloads/
 
 # Logs
 *.log
+
+# macOS
+.DS_Store
+
+# Environment
+env
