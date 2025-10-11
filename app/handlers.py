@@ -89,7 +89,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
 
         # Download audio
         await status_msg.edit_text("⏳ Загружаю аудио...")
-        audio_file_path, video_title = youtube_service.download_and_convert(url)
+        audio_file_path, video_title, audio_duration = youtube_service.download_and_convert(url)
 
         # Check file size (Telegram limit is 50MB)
         file_size = audio_file_path.stat().st_size
@@ -108,16 +108,21 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         # Get file extension
         file_ext = audio_file_path.suffix
         audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
-        await message.answer_audio(audio=audio_file, title=video_title)
+        await message.answer_audio(
+            audio=audio_file,
+            title=video_title,
+            duration=audio_duration
+        )
 
         # Wait a bit to ensure Telegram has read the file
         await asyncio.sleep(1)
 
-        # Delete status message
+        # Delete both messages
         try:
             await status_msg.delete()
+            await message.delete()
         except Exception as e:
-            logger.warning(f"Could not delete status message: {e}")
+            logger.warning(f"Could not delete messages: {e}")
 
         logger.info(f"Successfully processed video for user {message.from_user.id}")
 
