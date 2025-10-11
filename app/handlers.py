@@ -89,7 +89,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
 
         # Download and convert
         await status_msg.edit_text("⏳ Загружаю и конвертирую видео...")
-        mp3_file = youtube_service.download_and_convert(url)
+        mp3_file, video_title = youtube_service.download_and_convert(url)
 
         # Check file size (Telegram limit is 50MB)
         file_size = mp3_file.stat().st_size
@@ -105,11 +105,8 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         # Send MP3 file
         await status_msg.edit_text("⏳ Отправляю MP3 файл...")
 
-        audio_file = FSInputFile(mp3_file)
-        await message.answer_audio(
-            audio=audio_file,
-            caption="✅ Готово! Вот твой MP3 файл."
-        )
+        audio_file = FSInputFile(mp3_file, filename=f"{video_title}.mp3")
+        await message.answer_audio(audio=audio_file, title=video_title)
 
         # Wait a bit to ensure Telegram has read the file
         await asyncio.sleep(1)

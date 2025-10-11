@@ -99,7 +99,7 @@ class YouTubeService:
             logger.error(f"Error checking video duration: {e}")
             raise YouTubeServiceError(f"Неожиданная ошибка: {str(e)}")
 
-    def download_and_convert(self, url: str) -> Path:
+    def download_and_convert(self, url: str) -> tuple[Path, str]:
         """
         Download YouTube video and convert to MP3
 
@@ -107,7 +107,7 @@ class YouTubeService:
             url: YouTube video URL
 
         Returns:
-            Path to the downloaded MP3 file
+            Tuple of (Path to the downloaded MP3 file, Video title)
 
         Raises:
             VideoUnavailableError: If video is not available
@@ -147,9 +147,10 @@ class YouTubeService:
                 # Download and convert
                 info = ydl.extract_info(url, download=True)
 
-                # Get the output file path
+                # Get the output file path and title
                 filename = ydl.prepare_filename(info)
                 mp3_file = Path(filename).with_suffix('.mp3')
+                video_title = info.get('title', 'audio')
 
                 if not mp3_file.exists():
                     raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
@@ -160,7 +161,7 @@ class YouTubeService:
                     raise VideoDownloadError("Загруженный файл пуст")
 
                 logger.info(f"Successfully converted: {mp3_file}")
-                return mp3_file
+                return mp3_file, video_title
 
         except (VideoUnavailableError, VideoRestrictedError, VideoDownloadError):
             # Re-raise our custom exceptions
