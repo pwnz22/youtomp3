@@ -103,7 +103,7 @@ async def cmd_start(message: Message, db_service: DatabaseService) -> None:
 async def cmd_stats(message: Message, db_service: DatabaseService, config: Config) -> None:
     """Handle /stats command (admin only)"""
     # Check if user is admin
-    if config.admin_user_ids and message.from_user.id not in config.admin_user_ids:
+    if not config.admin_user_ids or message.from_user.id not in config.admin_user_ids:
         await message.answer("⛔ У вас нет доступа к этой команде.")
         return
 
