@@ -1,6 +1,8 @@
 import asyncio
 import logging
 
+from aiogram.types import BotCommand
+
 from app.bot import create_bot, create_dispatcher
 from app.config import Config
 from app.database import DatabaseService
@@ -30,6 +32,14 @@ async def main():
         # Create bot and dispatcher
         bot = create_bot(config)
         dp = create_dispatcher(config, db_service)
+
+        # Setup bot commands menu
+        commands = [
+            BotCommand(command="start", description="Начать работу с ботом"),
+            BotCommand(command="stats", description="Статистика бота (только для админов)")
+        ]
+        await bot.set_my_commands(commands)
+        logger.info("Bot commands menu configured")
 
         logger.info("Bot started. Press Ctrl+C to stop.")
 
