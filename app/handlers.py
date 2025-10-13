@@ -8,6 +8,8 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, FSInputFile
 
+from app.config import Config
+from app.database import DatabaseService
 from app.services.youtube import (
     YouTubeService,
     VideoUnavailableError,
@@ -72,8 +74,18 @@ def clean_youtube_url(url: str) -> str:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, db_service: DatabaseService) -> None:
     """Handle /start command"""
+    # Track user
+    try:
+        await db_service.upsert_user(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+    except Exception as e:
+        logger.error(f"Failed to track user {message.from_user.id}: {e}")
+
     welcome_text = (
         "👋 Привет! Я бот для скачивания аудио из YouTube.\n\n"
         "📝 Как использовать:\n"
@@ -87,8 +99,28 @@ async def cmd_start(message: Message) -> None:
     await message.answer(welcome_text)
 
 
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, db_service: DatabaseService, config: Config) -> None:
+    """Handle /stats command (admin only)"""
+    # Check if user is admin
+    if config.admin_user_ids and message.from_user.id not in config.admin_user_ids:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+
+    stats = await db_service.get_stats()
+
+    stats_text = (
+        "📊 <b>Статистика бота:</b>\n\n"
+        f"👥 Всего пользователей: {stats['total_users']}\n"
+        f"✅ Успешных загрузок: {stats['total_downloads']}\n"
+        f"📊 Всего запросов: {stats['total_requests']}\n"
+    )
+
+    await message.answer(stats_text)
+
+
 @router.message(F.text)
-async def handle_message(message: Message, youtube_service: YouTubeService) -> None:
+async def handle_message(message: Message, youtube_service: YouTubeService, db_service: DatabaseService) -> None:
     """Handle text messages with YouTube URLs"""
     if not message.text:
         return
@@ -153,6 +185,18 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
             duration=audio_duration
         )
 
+        # Track successful download
+        try:
+            await db_service.add_download(
+                user_id=message.from_user.id,
+                url=url,
+                title=video_title,
+                file_size=file_size,
+                duration=audio_duration
+            )
+        except Exception as e:
+            logger.error(f"Failed to track download for user {message.from_user.id}: {e}")
+
         # Wait a bit to ensure Telegram has read the file
         await asyncio.sleep(1)
 
@@ -167,15 +211,42 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
 
     except VideoUnavailableError as e:
         logger.warning(f"Video unavailable for user {message.from_user.id}: {e}")
+        try:
+            await db_service.add_error(
+                user_id=message.from_user.id,
+                url=url,
+                error_type="VideoUnavailableError",
+                error_message=str(e)
+            )
+        except Exception as db_error:
+            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
         await message.answer(f"❌ {str(e)}")
     except VideoRestrictedError as e:
         logger.warning(f"Video restricted for user {message.from_user.id}: {e}")
+        try:
+            await db_service.add_error(
+                user_id=message.from_user.id,
+                url=url,
+                error_type="VideoRestrictedError",
+                error_message=str(e)
+            )
+        except Exception as db_error:
+            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
         await message.answer(
             f"❌ {str(e)}\n\n"
             "💡 Попробуйте другое видео без ограничений."
         )
     except VideoDownloadError as e:
         logger.warning(f"Video download error for user {message.from_user.id}: {e}")
+        try:
+            await db_service.add_error(
+                user_id=message.from_user.id,
+                url=url,
+                error_type="VideoDownloadError",
+                error_message=str(e)
+            )
+        except Exception as db_error:
+            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
         await message.answer(
             f"❌ {str(e)}\n\n"
             "💡 Рекомендации:\n"
@@ -185,9 +256,27 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         )
     except YouTubeServiceError as e:
         logger.error(f"YouTube service error for user {message.from_user.id}: {e}")
+        try:
+            await db_service.add_error(
+                user_id=message.from_user.id,
+                url=url,
+                error_type="YouTubeServiceError",
+                error_message=str(e)
+            )
+        except Exception as db_error:
+            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
         await message.answer(f"❌ {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error processing video for user {message.from_user.id}: {e}")
+        try:
+            await db_service.add_error(
+                user_id=message.from_user.id,
+                url=url,
+                error_type="UnexpectedError",
+                error_message=str(e)
+            )
+        except Exception as db_error:
+            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
         await message.answer(
             "❌ Произошла непредвиденная ошибка.\n"
             "Пожалуйста, попробуй другую ссылку или повтори попытку позже."

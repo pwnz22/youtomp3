@@ -38,6 +38,10 @@ ENV/
 # Downloaded files
 downloads/
 
+# Database files
+data/*.db
+data/*.db-*
+
 # Logs
 *.log
 

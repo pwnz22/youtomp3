@@ -5,6 +5,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from app.config import Config
+from app.database import DatabaseService
 from app.handlers import router
 from app.services.youtube import YouTubeService
 
@@ -20,7 +21,7 @@ def create_bot(config: Config) -> Bot:
     )
 
 
-def create_dispatcher(config: Config) -> Dispatcher:
+def create_dispatcher(config: Config, db_service: DatabaseService) -> Dispatcher:
     """Create and configure dispatcher with handlers"""
     dp = Dispatcher()
 
@@ -30,7 +31,11 @@ def create_dispatcher(config: Config) -> Dispatcher:
     )
 
     # Pass dependencies via workflow_data
-    dp.workflow_data.update({"youtube_service": youtube_service})
+    dp.workflow_data.update({
+        "youtube_service": youtube_service,
+        "db_service": db_service,
+        "config": config,
+    })
     dp.include_router(router)
 
     return dp
