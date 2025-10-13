@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -34,6 +35,42 @@ def is_youtube_url(text: str) -> bool:
     return False
 
 
+def clean_youtube_url(url: str) -> str:
+    """
+    Clean YouTube URL by removing playlist and extra parameters
+    Extract video ID and return clean URL
+
+    Examples:
+        https://www.youtube.com/watch?v=VIDEO_ID&list=...&index=3
+        -> https://www.youtube.com/watch?v=VIDEO_ID
+
+        https://youtu.be/VIDEO_ID?list=...
+        -> https://www.youtube.com/watch?v=VIDEO_ID
+    """
+    # Parse the URL
+    parsed = urlparse(url)
+
+    # Extract video ID
+    video_id = None
+
+    # Case 1: youtu.be/VIDEO_ID
+    if 'youtu.be' in parsed.netloc:
+        video_id = parsed.path.strip('/')
+
+    # Case 2: youtube.com/watch?v=VIDEO_ID
+    elif 'youtube.com' in parsed.netloc:
+        query_params = parse_qs(parsed.query)
+        if 'v' in query_params:
+            video_id = query_params['v'][0]
+
+    # Return clean URL with only video ID
+    if video_id:
+        return f"https://www.youtube.com/watch?v={video_id}"
+
+    # If we couldn't extract video ID, return original URL
+    return url
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     """Handle /start command"""
@@ -63,7 +100,9 @@ async def handle_message(message: Message, youtube_service: YouTubeService) -> N
         )
         return
 
-    url = message.text.strip()
+    # Clean URL from playlist and extra parameters
+    url = clean_youtube_url(message.text.strip())
+    logger.info(f"Cleaned URL: {url}")
     audio_file_path = None
 
     try:

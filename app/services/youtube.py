@@ -149,20 +149,31 @@ class YouTubeService:
 
                 # Get the output file path, title, and duration
                 filename = ydl.prepare_filename(info)
-                # After FFmpegExtractAudio, extension changes to audio format
-                base_path = Path(filename).with_suffix('')
                 video_title = info.get('title', 'audio')
                 duration = info.get('duration', 0)
 
-                # Find the actual audio file (could be .m4a, .opus, .webm, etc)
+                logger.info(f"yt-dlp prepare_filename returned: {filename}")
+
+                # After FFmpegExtractAudio, extension changes to audio format
+                base_path = Path(filename).with_suffix('')
+                logger.info(f"Base path (without extension): {base_path}")
+
+                # List all files in download directory with our unique_id
+                all_files = list(self.download_dir.glob(f"{unique_id}_*"))
+                logger.info(f"Files in download dir with unique_id: {[str(f) for f in all_files]}")
+
+                # Find the actual audio file - just take the first file with our unique_id
+                # (should be only one after FFmpegExtractAudio removes the original)
                 audio_file = None
-                for ext in ['.m4a', '.opus', '.webm', '.mp3', '.ogg']:
-                    potential_file = base_path.with_suffix(ext)
-                    if potential_file.exists():
-                        audio_file = potential_file
+                for file in all_files:
+                    if file.is_file() and file.suffix in ['.m4a', '.opus', '.webm', '.mp3', '.ogg']:
+                        audio_file = file
+                        logger.info(f"Found audio file: {audio_file}")
                         break
 
                 if not audio_file or not audio_file.exists():
+                    logger.error(f"Audio file not found")
+                    logger.error(f"Available files: {all_files}")
                     raise FileNotFoundError(f"Audio file not found: {base_path}")
 
                 # Check if file is empty
