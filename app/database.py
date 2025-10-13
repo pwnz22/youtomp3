@@ -20,19 +20,21 @@ class DatabaseService:
         Args:
             database_url: SQLAlchemy database URL (e.g., sqlite+aiosqlite:///data/bot.db)
         """
-        # Configure engine with proper settings for SQLite
-        connect_args = {}
-        if "sqlite" in database_url:
-            connect_args["check_same_thread"] = False
+        # Configure engine with proper settings
+        engine_kwargs = {
+            "echo": False,
+        }
 
-        self.engine = create_async_engine(
-            database_url,
-            echo=False,
-            connect_args=connect_args,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True  # Verify connections before using
-        )
+        # SQLite-specific settings
+        if "sqlite" in database_url:
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
+        else:
+            # Pool settings only for non-SQLite databases
+            engine_kwargs["pool_size"] = 5
+            engine_kwargs["max_overflow"] = 10
+            engine_kwargs["pool_pre_ping"] = True
+
+        self.engine = create_async_engine(database_url, **engine_kwargs)
         self.async_session = async_sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False
         )
