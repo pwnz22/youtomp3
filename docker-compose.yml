@@ -7,3 +7,4 @@ services:
       - .env
     volumes:
       - ./downloads:/app/downloads
+      - ./data:/app/data
