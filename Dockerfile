@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
-# Install ffmpeg for audio conversion
+# Install only minimal ffmpeg (no X11/mesa/GUI deps)
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
