@@ -78,15 +78,32 @@ def clean_youtube_url(url: str) -> str:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, db_service: DatabaseService) -> None:
+async def cmd_start(message: Message, db_service: DatabaseService, config: Config) -> None:
     """Handle /start command"""
     # Track user
     try:
-        await db_service.upsert_user(
+        user, is_new = await db_service.upsert_user(
             user_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
         )
+
+        # Notify about new user
+        if is_new and config.notify_chat_id:
+            if message.from_user.username:
+                username = f'<a href="tg://user?id={message.from_user.id}">@{message.from_user.username}</a>'
+            else:
+                username = "нет"
+            notify_text = (
+                f"👤 <b>Новый пользователь!</b>\n\n"
+                f"Имя: {message.from_user.first_name or '—'}\n"
+                f"Username: {username}\n"
+                f"ID: <code>{message.from_user.id}</code>"
+            )
+            try:
+                await message.bot.send_message(config.notify_chat_id, notify_text)
+            except Exception as e:
+                logger.error(f"Failed to send new user notification: {e}")
     except Exception as e:
         logger.error(f"Failed to track user {message.from_user.id}: {e}")
 

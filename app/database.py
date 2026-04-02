@@ -53,21 +53,18 @@ class DatabaseService:
     # User operations
     async def upsert_user(
         self, user_id: int, username: Optional[str], first_name: Optional[str]
-    ) -> User:
+    ) -> tuple[User, bool]:
         """
         Insert or update user (update last_active if exists)
-        Uses merge for atomic upsert operation
-
-        Args:
-            user_id: Telegram user ID
-            username: Telegram username
-            first_name: User's first name
 
         Returns:
-            User object
+            Tuple of (User object, is_new: True if user was just created)
         """
         async with self.async_session() as session:
-            # Create user object
+            # Check if user already exists
+            existing = await session.get(User, user_id)
+            is_new = existing is None
+
             user = User(
                 id=user_id,
                 username=username,
@@ -76,16 +73,13 @@ class DatabaseService:
                 created_at=datetime.utcnow(),
             )
 
-            # Use merge for atomic upsert - SQLAlchemy handles the race condition
             user = await session.merge(user)
-
-            # For existing users, update last_active manually
             user.last_active = datetime.utcnow()
 
             await session.commit()
             await session.refresh(user)
-            logger.info(f"Upserted user {user_id}")
-            return user
+            logger.info(f"{'New' if is_new else 'Updated'} user {user_id}")
+            return user, is_new
 
     # Download operations
     async def add_download(
