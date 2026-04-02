@@ -22,6 +22,10 @@ from app.services.youtube import (
 logger = logging.getLogger(__name__)
 router = Router()
 
+# Limit concurrent downloads to prevent server overload
+MAX_CONCURRENT_DOWNLOADS = 15
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
 # YouTube URL patterns
 YOUTUBE_PATTERNS = [
     r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w-]+',
@@ -140,6 +144,12 @@ async def handle_message(message: Message, youtube_service: YouTubeService, db_s
     try:
         # Send processing message
         status_msg = await message.answer("⏳ Проверяю видео...")
+
+        # Wait for available slot
+        if download_semaphore.locked():
+            await status_msg.edit_text("⏳ Очередь загрузки... Подожди немного.")
+
+        await download_semaphore.acquire()
 
         # Check video duration
         is_valid, duration = youtube_service.check_duration(url)
@@ -282,6 +292,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService, db_s
             "Пожалуйста, попробуй другую ссылку или повтори попытку позже."
         )
     finally:
+        download_semaphore.release()
         # Always cleanup the file
         if audio_file_path:
             youtube_service.cleanup_file(audio_file_path)
