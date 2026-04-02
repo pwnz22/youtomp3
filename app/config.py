@@ -10,8 +10,7 @@ class Config:
     bot_token: str
     max_video_duration: int = 1800  # 30 minutes in seconds
     database_url: str = "sqlite+aiosqlite:///data/bot.db"
-    admin_user_ids: list[int] = None  # Admin user IDs for /stats command
-    notify_chat_id: int = None  # Chat ID for new user notifications
+    admin_user_ids: list[int] = None  # Admin user IDs for /stats and notifications
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -33,13 +32,8 @@ class Config:
         admin_ids_str = os.getenv("ADMIN_USER_IDS", "")
         admin_user_ids = [int(uid.strip()) for uid in admin_ids_str.split(",") if uid.strip()] if admin_ids_str else []
 
-        # Optional: chat ID for new user notifications
-        notify_chat_id_str = os.getenv("NOTIFY_CHAT_ID", "")
-        notify_chat_id = int(notify_chat_id_str) if notify_chat_id_str.strip() else None
-
         return cls(
             bot_token=bot_token,
             database_url=database_url,
             admin_user_ids=admin_user_ids or None,
-            notify_chat_id=notify_chat_id,
         )

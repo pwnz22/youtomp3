@@ -88,8 +88,8 @@ async def cmd_start(message: Message, db_service: DatabaseService, config: Confi
             first_name=message.from_user.first_name,
         )
 
-        # Notify about new user
-        if is_new and config.notify_chat_id:
+        # Notify admins about new user
+        if is_new and config.admin_user_ids:
             if message.from_user.username:
                 username = f'<a href="tg://user?id={message.from_user.id}">@{message.from_user.username}</a>'
             else:
@@ -100,10 +100,11 @@ async def cmd_start(message: Message, db_service: DatabaseService, config: Confi
                 f"Username: {username}\n"
                 f"ID: <code>{message.from_user.id}</code>"
             )
-            try:
-                await message.bot.send_message(config.notify_chat_id, notify_text)
-            except Exception as e:
-                logger.error(f"Failed to send new user notification: {e}")
+            for admin_id in config.admin_user_ids:
+                try:
+                    await message.bot.send_message(admin_id, notify_text)
+                except Exception as e:
+                    logger.error(f"Failed to send notification to admin {admin_id}: {e}")
     except Exception as e:
         logger.error(f"Failed to track user {message.from_user.id}: {e}")
 
