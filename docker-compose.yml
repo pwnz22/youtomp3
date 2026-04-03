@@ -8,3 +8,5 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./data:/app/data
+      - ./app:/app/app
+      - ./main.py:/app/main.py

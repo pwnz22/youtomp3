@@ -26,6 +26,10 @@ router = Router()
 MAX_CONCURRENT_DOWNLOADS = 15
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
+# Search results cache: {message_id: [videos]}
+SEARCH_RESULTS_PER_PAGE = 10
+search_cache: dict[int, list[dict]] = {}
+
 # YouTube URL patterns
 YOUTUBE_PATTERNS = [
     r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w-]+',
@@ -141,8 +145,39 @@ async def cmd_stats(message: Message, db_service: DatabaseService, config: Confi
     await message.answer(stats_text)
 
 
+def build_search_keyboard(videos: list[dict], page: int = 0) -> InlineKeyboardMarkup:
+    """Build inline keyboard for search results page"""
+    start = page * SEARCH_RESULTS_PER_PAGE
+    end = start + SEARCH_RESULTS_PER_PAGE
+    page_videos = videos[start:end]
+    total_pages = (len(videos) + SEARCH_RESULTS_PER_PAGE - 1) // SEARCH_RESULTS_PER_PAGE
+
+    buttons = []
+    for v in page_videos:
+        dur = format_duration(v['duration']) if v['duration'] else "?"
+        title = v['title'][:45] + "..." if len(v['title']) > 45 else v['title']
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🎵 {title} [{dur}]",
+                callback_data=f"dl:{v['id']}"
+            )
+        ])
+
+    # Navigation buttons
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"page:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"page:{page + 1}"))
+        buttons.append(nav)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 async def handle_search(message: Message, youtube_service: YouTubeService) -> None:
-    """Search YouTube and show results as inline buttons"""
+    """Search YouTube and show results as inline buttons with pagination"""
     query = message.text.strip()
     if len(query) < 2:
         await message.answer("❌ Слишком короткий запрос. Введи название видео.")
@@ -151,32 +186,45 @@ async def handle_search(message: Message, youtube_service: YouTubeService) -> No
     status_msg = await message.answer("🔍 Ищу видео...")
 
     try:
-        videos = youtube_service.search(query)
+        videos = youtube_service.search(query, max_results=30)
 
         if not videos:
             await status_msg.edit_text("❌ Ничего не найдено. Попробуй другой запрос.")
             return
 
-        buttons = []
-        for v in videos:
-            dur = format_duration(v['duration']) if v['duration'] else "?"
-            title = v['title'][:45] + "..." if len(v['title']) > 45 else v['title']
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"🎵 {title} [{dur}]",
-                    callback_data=f"dl:{v['id']}"
-                )
-            ])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await status_msg.edit_text(
+        # Cache results for pagination
+        keyboard = build_search_keyboard(videos, page=0)
+        result = await status_msg.edit_text(
             f"🔍 Результаты по запросу: <b>{query}</b>",
             reply_markup=keyboard
         )
+        search_cache[result.message_id] = videos
 
     except Exception as e:
         logger.error(f"Search error for user {message.from_user.id}: {e}")
         await status_msg.edit_text("❌ Ошибка при поиске. Попробуй позже.")
+
+
+@router.callback_query(F.data.startswith("page:"))
+async def handle_page_callback(callback: CallbackQuery) -> None:
+    """Handle pagination buttons"""
+    page = int(callback.data.split(":", 1)[1])
+    msg_id = callback.message.message_id
+    videos = search_cache.get(msg_id)
+
+    if not videos:
+        await callback.answer("Результаты устарели. Повтори поиск.")
+        return
+
+    keyboard = build_search_keyboard(videos, page=page)
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def handle_noop_callback(callback: CallbackQuery) -> None:
+    """Handle page counter button (no action)"""
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("dl:"))
@@ -189,6 +237,9 @@ async def handle_download_callback(
     video_id = callback.data.split(":", 1)[1]
     url = f"https://www.youtube.com/watch?v={video_id}"
     await callback.answer()
+
+    # Cleanup search cache
+    search_cache.pop(callback.message.message_id, None)
 
     # Edit the search results message to show progress (edit_text removes reply_markup)
     status_msg = callback.message
