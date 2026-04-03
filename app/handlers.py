@@ -6,6 +6,8 @@ from urllib.parse import urlparse, parse_qs
 
 from aiogram import Router, F
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, FSInputFile, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.config import Config
@@ -29,6 +31,10 @@ download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 # Search results cache: {message_id: [videos]}
 SEARCH_RESULTS_PER_PAGE = 10
 search_cache: dict[int, list[dict]] = {}
+
+
+class BroadcastState(StatesGroup):
+    waiting_message = State()
 
 # YouTube URL patterns
 YOUTUBE_PATTERNS = [
@@ -143,6 +149,125 @@ async def cmd_stats(message: Message, db_service: DatabaseService, config: Confi
     )
 
     await message.answer(stats_text)
+
+
+# --- Broadcast (admin only) ---
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, state: FSMContext, config: Config) -> None:
+    """Start broadcast dialog"""
+    if not config.admin_user_ids or message.from_user.id not in config.admin_user_ids:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+
+    await state.set_state(BroadcastState.waiting_message)
+    await message.answer(
+        "📨 Отправь сообщение для рассылки (текст, фото или видео).\n"
+        "/cancel — отмена"
+    )
+
+
+@router.message(Command("cancel"), BroadcastState.waiting_message)
+async def cmd_cancel_broadcast(message: Message, state: FSMContext) -> None:
+    """Cancel broadcast"""
+    await state.clear()
+    await message.answer("❌ Рассылка отменена.")
+
+
+@router.message(BroadcastState.waiting_message)
+async def handle_broadcast_message(
+    message: Message, state: FSMContext, db_service: DatabaseService
+) -> None:
+    """Receive broadcast message and show preview"""
+    user_ids = await db_service.get_all_user_ids()
+
+    # Store message info in FSM data
+    data = {"user_count": len(user_ids)}
+
+    if message.photo:
+        data["type"] = "photo"
+        data["photo_id"] = message.photo[-1].file_id
+        data["caption"] = message.caption or ""
+        preview = f"📷 Фото" + (f"\n{message.caption}" if message.caption else "")
+    elif message.video:
+        data["type"] = "video"
+        data["video_id"] = message.video.file_id
+        data["caption"] = message.caption or ""
+        preview = f"🎬 Видео" + (f"\n{message.caption}" if message.caption else "")
+    elif message.text:
+        data["type"] = "text"
+        data["text"] = message.text
+        preview = message.text
+    else:
+        await message.answer("❌ Поддерживаются только текст, фото и видео.")
+        return
+
+    await state.update_data(**data)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Отправить", callback_data="broadcast:confirm"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel"),
+        ]
+    ])
+
+    await message.answer(
+        f"📨 <b>Превью рассылки:</b>\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"{preview}\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"👥 Получателей: {len(user_ids)}",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data == "broadcast:confirm")
+async def handle_broadcast_confirm(
+    callback: CallbackQuery, state: FSMContext, db_service: DatabaseService
+) -> None:
+    """Send broadcast to all users"""
+    data = await state.get_data()
+    if not data:
+        await callback.answer("Сессия истекла. Начни заново /broadcast")
+        return
+
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    status_msg = await callback.message.answer("⏳ Рассылка началась...")
+
+    user_ids = await db_service.get_all_user_ids()
+    sent = 0
+    errors = 0
+    msg_type = data.get("type")
+
+    for user_id in user_ids:
+        try:
+            if msg_type == "text":
+                await callback.bot.send_message(user_id, data["text"])
+            elif msg_type == "photo":
+                await callback.bot.send_photo(user_id, data["photo_id"], caption=data.get("caption"))
+            elif msg_type == "video":
+                await callback.bot.send_video(user_id, data["video_id"], caption=data.get("caption"))
+            sent += 1
+        except Exception:
+            errors += 1
+
+        await asyncio.sleep(0.05)
+
+    await state.clear()
+    await status_msg.edit_text(
+        f"✅ Рассылка завершена: {sent}/{len(user_ids)} доставлено"
+        + (f", {errors} ошибок" if errors else "")
+    )
+
+
+@router.callback_query(F.data == "broadcast:cancel")
+async def handle_broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """Cancel broadcast"""
+    await state.clear()
+    await callback.answer()
+    await callback.message.edit_text("❌ Рассылка отменена.", reply_markup=None)
 
 
 def build_search_keyboard(videos: list[dict], page: int = 0) -> InlineKeyboardMarkup:

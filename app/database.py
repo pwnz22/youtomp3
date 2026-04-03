@@ -180,3 +180,9 @@ class DatabaseService:
                 "total_errors": total_errors,
                 "total_requests": total_requests,
             }
+
+    async def get_all_user_ids(self) -> list[int]:
+        """Get all registered user IDs"""
+        async with self.async_session() as session:
+            result = await session.execute(select(User.id))
+            return [row[0] for row in result.fetchall()]

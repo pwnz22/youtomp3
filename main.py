@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat
 
 from app.bot import create_bot, create_dispatcher
 from app.config import Config
@@ -33,12 +33,25 @@ async def main():
         bot = create_bot(config)
         dp = create_dispatcher(config, db_service)
 
-        # Setup bot commands menu
+        # Setup bot commands menu (public)
         commands = [
             BotCommand(command="start", description="Начать работу с ботом"),
-            BotCommand(command="stats", description="Статистика бота (только для админов)")
         ]
         await bot.set_my_commands(commands)
+
+        # Admin commands (visible only to admins)
+        if config.admin_user_ids:
+            admin_commands = [
+                BotCommand(command="start", description="Начать работу с ботом"),
+                BotCommand(command="stats", description="Статистика бота"),
+                BotCommand(command="broadcast", description="Рассылка сообщений"),
+            ]
+            for admin_id in config.admin_user_ids:
+                try:
+                    await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+                except Exception as e:
+                    logger.warning(f"Failed to set admin commands for {admin_id}: {e}")
+
         logger.info("Bot commands menu configured")
 
         logger.info("Bot started. Press Ctrl+C to stop.")
