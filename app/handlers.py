@@ -190,10 +190,9 @@ async def handle_download_callback(
     url = f"https://www.youtube.com/watch?v={video_id}"
     await callback.answer()
 
-    # Edit the search results message to show progress
+    # Edit the search results message to show progress (edit_text removes reply_markup)
     status_msg = callback.message
-    await status_msg.edit_text("⏳ Проверяю видео...")
-    await status_msg.edit_reply_markup(reply_markup=None)
+    await status_msg.edit_text("⏳ Проверяю видео...", reply_markup=None)
 
     audio_file_path = None
 
