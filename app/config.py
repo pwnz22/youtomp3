@@ -11,6 +11,7 @@ class Config:
     max_video_duration: int = 1800  # 30 minutes in seconds
     database_url: str = "sqlite+aiosqlite:///data/bot.db"
     admin_user_ids: list[int] = None  # Admin user IDs for /stats and notifications
+    youtube_api_key: str = None  # YouTube Data API v3 key for search
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -32,8 +33,11 @@ class Config:
         admin_ids_str = os.getenv("ADMIN_USER_IDS", "")
         admin_user_ids = [int(uid.strip()) for uid in admin_ids_str.split(",") if uid.strip()] if admin_ids_str else []
 
+        youtube_api_key = os.getenv("YOUTUBE_API_KEY", "").strip() or None
+
         return cls(
             bot_token=bot_token,
             database_url=database_url,
             admin_user_ids=admin_user_ids or None,
+            youtube_api_key=youtube_api_key,
         )

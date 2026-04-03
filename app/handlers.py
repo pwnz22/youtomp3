@@ -6,7 +6,7 @@ from urllib.parse import urlparse, parse_qs
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.config import Config
 from app.database import DatabaseService
@@ -111,12 +111,12 @@ async def cmd_start(message: Message, db_service: DatabaseService, config: Confi
     welcome_text = (
         "👋 Привет! Я бот для скачивания аудио из YouTube.\n\n"
         "📝 Как использовать:\n"
-        "Просто отправь мне ссылку на YouTube видео, и я скачаю аудио.\n\n"
+        "• Отправь <b>ссылку</b> на YouTube видео\n"
+        "• Или напиши <b>название</b> для поиска\n\n"
         "⚠️ Ограничения:\n"
         "• Максимальная длительность видео: 30 минут\n"
-        "• Формат: M4A (высокое качество)\n"
-        "• Только одиночные видео (плейлисты не поддерживаются)\n\n"
-        "Отправь ссылку, чтобы начать!"
+        "• Формат: M4A (высокое качество)\n\n"
+        "Отправь ссылку или название, чтобы начать!"
     )
     await message.answer(welcome_text)
 
@@ -141,17 +141,147 @@ async def cmd_stats(message: Message, db_service: DatabaseService, config: Confi
     await message.answer(stats_text)
 
 
+async def handle_search(message: Message, youtube_service: YouTubeService) -> None:
+    """Search YouTube and show results as inline buttons"""
+    query = message.text.strip()
+    if len(query) < 2:
+        await message.answer("❌ Слишком короткий запрос. Введи название видео.")
+        return
+
+    status_msg = await message.answer("🔍 Ищу видео...")
+
+    try:
+        videos = youtube_service.search(query)
+
+        if not videos:
+            await status_msg.edit_text("❌ Ничего не найдено. Попробуй другой запрос.")
+            return
+
+        buttons = []
+        for v in videos:
+            dur = format_duration(v['duration']) if v['duration'] else "?"
+            title = v['title'][:45] + "..." if len(v['title']) > 45 else v['title']
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"🎵 {title} [{dur}]",
+                    callback_data=f"dl:{v['id']}"
+                )
+            ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await status_msg.edit_text(
+            f"🔍 Результаты по запросу: <b>{query}</b>",
+            reply_markup=keyboard
+        )
+
+    except Exception as e:
+        logger.error(f"Search error for user {message.from_user.id}: {e}")
+        await status_msg.edit_text("❌ Ошибка при поиске. Попробуй позже.")
+
+
+@router.callback_query(F.data.startswith("dl:"))
+async def handle_download_callback(
+    callback: CallbackQuery,
+    youtube_service: YouTubeService,
+    db_service: DatabaseService,
+) -> None:
+    """Handle video selection from search results"""
+    video_id = callback.data.split(":", 1)[1]
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    await callback.answer()
+
+    # Edit the search results message to show progress
+    status_msg = callback.message
+    await status_msg.edit_text("⏳ Проверяю видео...")
+    await status_msg.edit_reply_markup(reply_markup=None)
+
+    audio_file_path = None
+
+    try:
+        if download_semaphore.locked():
+            await status_msg.edit_text("⏳ Очередь загрузки... Подожди немного.")
+
+        await download_semaphore.acquire()
+
+        is_valid, duration = youtube_service.check_duration(url)
+
+        if not is_valid:
+            if duration:
+                minutes = duration // 60
+                await status_msg.edit_text(
+                    f"❌ Видео слишком длинное ({minutes} мин). Максимум: 30 минут."
+                )
+            else:
+                await status_msg.edit_text("❌ Не удалось определить длительность видео.")
+            return
+
+        await status_msg.edit_text("⏳ Загружаю аудио...")
+        audio_file_path, video_title, audio_duration = youtube_service.download_and_convert(url)
+
+        file_size = audio_file_path.stat().st_size
+        if file_size > 50 * 1024 * 1024:
+            await status_msg.edit_text(
+                f"❌ Файл слишком большой ({file_size / (1024 * 1024):.1f} MB). Максимум: 50 MB."
+            )
+            return
+
+        await status_msg.edit_text("⏳ Отправляю аудио...")
+
+        file_ext = audio_file_path.suffix
+        audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
+        await callback.message.answer_audio(
+            audio=audio_file,
+            title=video_title,
+            duration=audio_duration,
+        )
+
+        try:
+            await db_service.add_download(
+                user_id=callback.from_user.id,
+                url=url,
+                title=video_title,
+                file_size=file_size,
+                duration=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"Failed to track download: {e}")
+
+        await asyncio.sleep(1)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        logger.info(f"Search download complete for user {callback.from_user.id}: {video_title}")
+
+    except (VideoUnavailableError, VideoRestrictedError, VideoDownloadError, YouTubeServiceError) as e:
+        logger.warning(f"Download error from search for user {callback.from_user.id}: {e}")
+        await status_msg.edit_text(f"❌ {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error from search for user {callback.from_user.id}: {e}")
+        await status_msg.edit_text("❌ Произошла ошибка. Попробуй позже.")
+    finally:
+        download_semaphore.release()
+        if audio_file_path:
+            youtube_service.cleanup_file(audio_file_path)
+
+
+def format_duration(seconds: int) -> str:
+    """Format seconds to MM:SS"""
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes}:{secs:02d}"
+
+
 @router.message(F.text)
 async def handle_message(message: Message, youtube_service: YouTubeService, db_service: DatabaseService) -> None:
-    """Handle text messages with YouTube URLs"""
+    """Handle text messages - YouTube URLs or search queries"""
     if not message.text:
         return
 
-    # Check if message contains YouTube URL
+    # If not a YouTube URL - treat as search query
     if not is_youtube_url(message.text):
-        await message.answer(
-            "❌ Пожалуйста, отправь корректную ссылку на YouTube видео."
-        )
+        await handle_search(message, youtube_service)
         return
 
     # Clean URL from playlist and extra parameters

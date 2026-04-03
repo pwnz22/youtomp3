@@ -1,7 +1,12 @@
+import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 
 import yt_dlp
 from yt_dlp.utils import DownloadError, ExtractorError
@@ -33,16 +38,10 @@ class VideoDownloadError(YouTubeServiceError):
 class YouTubeService:
     """Service for downloading audio from YouTube videos"""
 
-    def __init__(self, max_duration: int = 1800, audio_quality: str = "best"):
-        """
-        Initialize YouTube service
-
-        Args:
-            max_duration: Maximum video duration in seconds (default: 1800 = 30 min)
-            audio_quality: Audio quality preference (default: best)
-        """
+    def __init__(self, max_duration: int = 1800, audio_quality: str = "best", api_key: str = None):
         self.max_duration = max_duration
         self.audio_quality = audio_quality
+        self.api_key = api_key
         self.download_dir = Path("downloads")
         self.download_dir.mkdir(exist_ok=True)
 
@@ -215,6 +214,115 @@ class YouTubeService:
         except Exception as e:
             logger.error(f"Unexpected error during download: {e}")
             raise VideoDownloadError(f"Неожиданная ошибка при скачивании: {str(e)}")
+
+    def search(self, query: str, max_results: int = 5) -> list[dict]:
+        """Search with YouTube Data API v3 (primary) and yt-dlp (fallback)"""
+        if self.api_key:
+            try:
+                return self._search_api(query, max_results)
+            except Exception as e:
+                logger.warning(f"API search failed, falling back to yt-dlp: {e}")
+
+        return self._search_ytdlp(query, max_results)
+
+    def _search_api(self, query: str, max_results: int = 5) -> list[dict]:
+        """Search via YouTube Data API v3"""
+        # Step 1: Search for videos
+        params = urlencode({
+            'part': 'snippet',
+            'q': query,
+            'type': 'video',
+            'maxResults': max_results,
+            'key': self.api_key,
+        })
+        url = f"https://www.googleapis.com/youtube/v3/search?{params}"
+        req = Request(url, headers={'Accept': 'application/json'})
+
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+
+        if not data.get('items'):
+            return []
+
+        # Collect video IDs and basic info
+        videos = []
+        video_ids = []
+        for item in data['items']:
+            vid = item['id'].get('videoId')
+            if not vid:
+                continue
+            video_ids.append(vid)
+            videos.append({
+                'id': vid,
+                'title': item['snippet'].get('title', 'Без названия'),
+                'channel': item['snippet'].get('channelTitle', '—'),
+                'duration': 0,
+            })
+
+        # Step 2: Get durations in one batch request
+        if video_ids:
+            params = urlencode({
+                'part': 'contentDetails',
+                'id': ','.join(video_ids),
+                'key': self.api_key,
+            })
+            url = f"https://www.googleapis.com/youtube/v3/videos?{params}"
+            req = Request(url, headers={'Accept': 'application/json'})
+
+            with urlopen(req, timeout=10) as resp:
+                details = json.loads(resp.read())
+
+            duration_map = {}
+            for item in details.get('items', []):
+                dur_str = item['contentDetails'].get('duration', 'PT0S')
+                duration_map[item['id']] = self._parse_iso_duration(dur_str)
+
+            for v in videos:
+                v['duration'] = duration_map.get(v['id'], 0)
+
+        logger.info(f"API search for '{query}': {len(videos)} results")
+        return videos
+
+    @staticmethod
+    def _parse_iso_duration(duration: str) -> int:
+        """Parse ISO 8601 duration (PT1H2M3S) to seconds"""
+        match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+        if not match:
+            return 0
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or 0)
+        seconds = int(match.group(3) or 0)
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _search_ytdlp(self, query: str, max_results: int = 5) -> list[dict]:
+        """Fallback search via yt-dlp"""
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                results = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
+
+                videos = []
+                for entry in results.get('entries', []):
+                    if not entry:
+                        continue
+                    videos.append({
+                        'id': entry.get('id'),
+                        'title': entry.get('title', 'Без названия'),
+                        'duration': entry.get('duration') or 0,
+                        'channel': entry.get('channel', entry.get('uploader', '—')),
+                    })
+
+                logger.info(f"yt-dlp search for '{query}': {len(videos)} results")
+                return videos
+
+        except Exception as e:
+            logger.error(f"yt-dlp search error: {e}")
+            raise YouTubeServiceError(f"Ошибка при поиске: {str(e)}")
 
     def cleanup_file(self, file_path: Path) -> None:
         """Delete the downloaded file"""
