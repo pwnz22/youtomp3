@@ -50,3 +50,7 @@ data/*.db-*
 
 # Environment
 env
+
+# Claude Code artifacts
+.claude/
+.context/

@@ -1,70 +1,82 @@
 # YouTube to MP3 Telegram Bot
 
-Telegram бот на Aiogram 3.x для конвертации YouTube видео в MP3 файлы.
+Telegram бот на Aiogram 3.x для конвертации YouTube видео в аудио (M4A).
 
 ## Возможности
 
-- Конвертация YouTube видео в MP3 (320 kbps)
+- Скачивание аудио из YouTube по ссылке
+- Поиск видео по названию (YouTube Data API v3 + fallback на yt-dlp)
+- Распознавание трека по голосовому сообщению через Shazam
+- Рассылка `/broadcast` (только для админов)
+- Статистика `/stats` (только для админов)
 - Ограничение длительности видео (до 30 минут)
 - Автоматическая очистка файлов после отправки
-- Простой интерфейс через Telegram
 
 ## Требования
 
 - Python 3.11+
-- FFmpeg
-- Docker (для контейнеризации)
+- FFmpeg (только для локального запуска без Docker)
+- Docker + Docker Compose (рекомендуется для прода)
+
+## Поддерживаемые платформы
+
+| Платформа              | Способ запуска                     | Wheels shazamio-core |
+|------------------------|------------------------------------|----------------------|
+| macOS arm64 (M1/M2/M3) | venv или Docker (linux/arm64)      | ✅ есть              |
+| Linux x86_64 (сервер)  | Docker (linux/amd64)               | ✅ есть              |
+| Linux aarch64          | Docker (linux/arm64)               | ✅ есть              |
+
+> Поскольку для всех целевых платформ опубликованы prebuilt wheels на PyPI,
+> Rust toolchain устанавливать не нужно — `pip install` справится сам.
 
 ## Установка
 
-### Локально
+### Локально (macOS / Linux)
 
-1. Клонируйте репозиторий
-2. Создайте виртуальное окружение:
+1. Клонировать репозиторий и установить FFmpeg:
+   ```bash
+   # macOS (M1/M2/M3)
+   brew install ffmpeg
+
+   # Linux (Debian/Ubuntu)
+   sudo apt-get install ffmpeg
+   ```
+
+2. Создать виртуальное окружение и установить зависимости:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. Создать `.env`:
+   ```bash
+   cp .env.example .env
+   # отредактируй BOT_TOKEN, ADMIN_USER_IDS, YOUTUBE_API_KEY
+   ```
+
+4. Запустить:
+   ```bash
+   python main.py
+   ```
+
+### Docker (M3 Pro локально / сервер)
+
+Multi-stage Dockerfile собирает образ под текущую архитектуру хоста (`linux/arm64` на M3 Pro, `linux/amd64` на сервере). FFmpeg уже включён в образ.
+
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# или
-venv\Scripts\activate  # Windows
-```
+# .env должен существовать
+docker compose up -d --build
 
-3. Установите зависимости:
-```bash
-pip install -r requirements.txt
-```
+# логи
+docker logs youtomp3-bot -f
 
-4. Создайте `.env` файл:
-```bash
-cp .env.example .env
-```
+# рестарт после изменения кода (volume монтирован)
+docker compose restart
 
-5. Добавьте токен бота в `.env`:
-```
-BOT_TOKEN=your_bot_token_here
-```
-
-6. Запустите бота:
-```bash
-python main.py
-```
-
-### С Docker
-
-1. Создайте `.env` файл с токеном бота
-
-2. Соберите образ:
-```bash
-docker build -t youtomp3-bot .
-```
-
-3. Запустите контейнер:
-```bash
-docker run -d --name youtomp3-bot --env-file .env youtomp3-bot
-```
-
-Или используйте docker-compose:
-```bash
-docker-compose up -d
+# полная пересборка
+./rebuild.sh
 ```
 
 ## Использование

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.2] — 2026-04-27
+
+### Added
+- Распознавание треков по голосовому сообщению через Shazam (shazamio)
+- Автоматический поиск распознанного трека на YouTube (первый результат)
+- Лимит длительности голосового — до 30 секунд
+- Multi-stage Dockerfile с поддержкой M1/M2/M3 (linux/arm64) и серверной linux/amd64
+
+### Changed
+- Логика скачивания и отправки аудио вынесена в общий helper `download_and_send_audio` (используется URL-, поиск- и voice-flow)
+- Семафор миграция на `async with` — устранён потенциальный double-release
+
+### Fixed
+- HTML-инъекция в voice handler: `title`/`artist` от Shazam теперь экранируются
+- `voice.duration` None больше не обходит лимит длительности
+- Защита от пустых (0 байт) voice-файлов перед вызовом Shazam
+- `videos[0]['id']` None-check в voice flow
+
 ## [0.3.0] — 2026-04-04
 
 ### Added

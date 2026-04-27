@@ -1,10 +1,12 @@
 import asyncio
+import html
 import logging
 import re
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-from aiogram import Router, F
+from aiogram import Bot, Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,6 +14,11 @@ from aiogram.types import Message, FSInputFile, CallbackQuery, InlineKeyboardMar
 
 from app.config import Config
 from app.database import DatabaseService
+from app.services.shazam import (
+    ShazamService,
+    ShazamServiceError,
+    TrackNotRecognizedError,
+)
 from app.services.youtube import (
     YouTubeService,
     VideoUnavailableError,
@@ -27,6 +34,12 @@ router = Router()
 # Limit concurrent downloads to prevent server overload
 MAX_CONCURRENT_DOWNLOADS = 15
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
+# Telegram audio file size limit (50 MB)
+MAX_AUDIO_FILE_SIZE = 50 * 1024 * 1024
+
+# Voice message duration limit for Shazam recognition (seconds)
+MAX_VOICE_DURATION = 30
 
 # Search results cache: {message_id: [videos]}
 SEARCH_RESULTS_PER_PAGE = 10
@@ -87,6 +100,141 @@ def clean_youtube_url(url: str) -> str:
     return url
 
 
+async def download_and_send_audio(
+    *,
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+    url: str,
+    status_msg: Message,
+    youtube_service: YouTubeService,
+    db_service: DatabaseService,
+) -> bool:
+    """
+    Shared YouTube → audio pipeline used by URL, search-result and voice handlers.
+
+    Edits status_msg with progress and final error text. Tracks success in DB
+    on Download, errors in DB.add_error. Returns True on success.
+    """
+    audio_file_path = None
+
+    if download_semaphore.locked():
+        try:
+            await status_msg.edit_text("⏳ Очередь загрузки... Подожди немного.")
+        except Exception:
+            pass
+
+    async with download_semaphore:
+        try:
+            is_valid, duration = youtube_service.check_duration(url)
+            if not is_valid:
+                if duration:
+                    minutes = duration // 60
+                    await status_msg.edit_text(
+                        f"❌ Видео слишком длинное ({minutes} мин).\n"
+                        f"Максимальная длительность: 30 минут."
+                    )
+                else:
+                    await status_msg.edit_text(
+                        "❌ Не удалось определить длительность видео.\n"
+                        "Возможно, это прямая трансляция или премьера."
+                    )
+                return False
+
+            await status_msg.edit_text("⏳ Загружаю аудио...")
+            audio_file_path, video_title, audio_duration = (
+                youtube_service.download_and_convert(url)
+            )
+
+            file_size = audio_file_path.stat().st_size
+            if file_size > MAX_AUDIO_FILE_SIZE:
+                await status_msg.edit_text(
+                    f"❌ Аудио файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
+                    f"Максимальный размер: 50 MB."
+                )
+                return False
+
+            await status_msg.edit_text("⏳ Отправляю аудио...")
+            file_ext = audio_file_path.suffix
+            audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
+            await bot.send_audio(
+                chat_id=chat_id,
+                audio=audio_file,
+                title=video_title,
+                duration=audio_duration,
+            )
+
+            try:
+                await db_service.add_download(
+                    user_id=user_id,
+                    url=url,
+                    title=video_title,
+                    file_size=file_size,
+                    duration=audio_duration,
+                )
+            except Exception as e:
+                logger.error(f"Failed to track download for user {user_id}: {e}")
+
+            logger.info(f"Successfully sent audio to user {user_id}: {video_title}")
+            return True
+
+        except (VideoUnavailableError, VideoRestrictedError, VideoDownloadError, YouTubeServiceError) as e:
+            error_type = type(e).__name__
+            logger.warning(f"{error_type} for user {user_id}: {e}")
+            try:
+                await db_service.add_error(
+                    user_id=user_id,
+                    url=url,
+                    error_type=error_type,
+                    error_message=str(e),
+                )
+            except Exception as db_error:
+                logger.error(f"Failed to track error for user {user_id}: {db_error}")
+
+            if isinstance(e, VideoRestrictedError):
+                text = f"❌ {e}\n\n💡 Попробуйте другое видео без ограничений."
+            elif isinstance(e, VideoDownloadError):
+                text = (
+                    f"❌ {e}\n\n"
+                    "💡 Рекомендации:\n"
+                    "• Попробуйте другое видео\n"
+                    "• Убедитесь, что видео доступно публично\n"
+                    "• Проверьте, что видео не защищено авторскими правами"
+                )
+            else:
+                text = f"❌ {e}"
+
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                await bot.send_message(chat_id, text)
+            return False
+
+        except Exception as e:
+            logger.error(f"Unexpected error for user {user_id}: {e}")
+            try:
+                await db_service.add_error(
+                    user_id=user_id,
+                    url=url,
+                    error_type="UnexpectedError",
+                    error_message=str(e),
+                )
+            except Exception as db_error:
+                logger.error(f"Failed to track error for user {user_id}: {db_error}")
+            try:
+                await status_msg.edit_text(
+                    "❌ Произошла непредвиденная ошибка.\n"
+                    "Пожалуйста, попробуй позже."
+                )
+            except Exception:
+                pass
+            return False
+
+        finally:
+            if audio_file_path:
+                youtube_service.cleanup_file(audio_file_path)
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message, db_service: DatabaseService, config: Config) -> None:
     """Handle /start command"""
@@ -122,11 +270,13 @@ async def cmd_start(message: Message, db_service: DatabaseService, config: Confi
         "👋 Привет! Я бот для скачивания аудио из YouTube.\n\n"
         "📝 Как использовать:\n"
         "• Отправь <b>ссылку</b> на YouTube видео\n"
-        "• Или напиши <b>название</b> для поиска\n\n"
+        "• Или напиши <b>название</b> для поиска\n"
+        "• Или запиши <b>голосовое</b> с фрагментом трека — я найду его через Shazam\n\n"
         "⚠️ Ограничения:\n"
         "• Максимальная длительность видео: 30 минут\n"
+        "• Голосовое для распознавания: до 30 секунд\n"
         "• Формат: M4A (высокое качество)\n\n"
-        "Отправь ссылку или название, чтобы начать!"
+        "Отправь ссылку, название или голосовое, чтобы начать!"
     )
     await message.answer(welcome_text)
 
@@ -370,75 +520,22 @@ async def handle_download_callback(
     status_msg = callback.message
     await status_msg.edit_text("⏳ Проверяю видео...", reply_markup=None)
 
-    audio_file_path = None
+    success = await download_and_send_audio(
+        bot=callback.bot,
+        chat_id=callback.message.chat.id,
+        user_id=callback.from_user.id,
+        url=url,
+        status_msg=status_msg,
+        youtube_service=youtube_service,
+        db_service=db_service,
+    )
 
-    try:
-        if download_semaphore.locked():
-            await status_msg.edit_text("⏳ Очередь загрузки... Подожди немного.")
-
-        await download_semaphore.acquire()
-
-        is_valid, duration = youtube_service.check_duration(url)
-
-        if not is_valid:
-            if duration:
-                minutes = duration // 60
-                await status_msg.edit_text(
-                    f"❌ Видео слишком длинное ({minutes} мин). Максимум: 30 минут."
-                )
-            else:
-                await status_msg.edit_text("❌ Не удалось определить длительность видео.")
-            return
-
-        await status_msg.edit_text("⏳ Загружаю аудио...")
-        audio_file_path, video_title, audio_duration = youtube_service.download_and_convert(url)
-
-        file_size = audio_file_path.stat().st_size
-        if file_size > 50 * 1024 * 1024:
-            await status_msg.edit_text(
-                f"❌ Файл слишком большой ({file_size / (1024 * 1024):.1f} MB). Максимум: 50 MB."
-            )
-            return
-
-        await status_msg.edit_text("⏳ Отправляю аудио...")
-
-        file_ext = audio_file_path.suffix
-        audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
-        await callback.message.answer_audio(
-            audio=audio_file,
-            title=video_title,
-            duration=audio_duration,
-        )
-
-        try:
-            await db_service.add_download(
-                user_id=callback.from_user.id,
-                url=url,
-                title=video_title,
-                file_size=file_size,
-                duration=audio_duration,
-            )
-        except Exception as e:
-            logger.error(f"Failed to track download: {e}")
-
+    if success:
         await asyncio.sleep(1)
         try:
             await status_msg.delete()
         except Exception:
             pass
-
-        logger.info(f"Search download complete for user {callback.from_user.id}: {video_title}")
-
-    except (VideoUnavailableError, VideoRestrictedError, VideoDownloadError, YouTubeServiceError) as e:
-        logger.warning(f"Download error from search for user {callback.from_user.id}: {e}")
-        await status_msg.edit_text(f"❌ {str(e)}")
-    except Exception as e:
-        logger.error(f"Unexpected error from search for user {callback.from_user.id}: {e}")
-        await status_msg.edit_text("❌ Произошла ошибка. Попробуй позже.")
-    finally:
-        download_semaphore.release()
-        if audio_file_path:
-            youtube_service.cleanup_file(audio_file_path)
 
 
 def format_duration(seconds: int) -> str:
@@ -446,6 +543,123 @@ def format_duration(seconds: int) -> str:
     minutes = seconds // 60
     secs = seconds % 60
     return f"{minutes}:{secs:02d}"
+
+
+@router.message(F.voice)
+async def handle_voice(
+    message: Message,
+    youtube_service: YouTubeService,
+    shazam_service: ShazamService,
+    db_service: DatabaseService,
+) -> None:
+    """Recognize track from voice message via Shazam, then download from YouTube"""
+    voice = message.voice
+    if voice is None:
+        return
+
+    if (voice.duration or 0) > MAX_VOICE_DURATION:
+        await message.answer(
+            f"❌ Голосовое слишком длинное ({voice.duration} сек).\n"
+            f"Максимум: {MAX_VOICE_DURATION} секунд."
+        )
+        return
+
+    status_msg = await message.answer("🎧 Распознаю трек через Shazam...")
+
+    voice_path: Path | None = None
+    try:
+        # Download voice file from Telegram into a temporary .ogg
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            voice_path = Path(tmp.name)
+        await message.bot.download(voice.file_id, destination=voice_path)
+
+        # Reject empty/zero-byte downloads before burning a Shazam API call
+        if voice_path.stat().st_size == 0:
+            logger.warning(f"Empty voice file from user {message.from_user.id}")
+            await status_msg.edit_text(
+                "❌ Не удалось получить голосовое сообщение. Попробуй ещё раз."
+            )
+            return
+
+        # Recognize via Shazam
+        try:
+            title, artist = await shazam_service.recognize_track(voice_path)
+        except TrackNotRecognizedError:
+            await status_msg.edit_text(
+                "🤷 Не удалось распознать трек.\n"
+                "Попробуй записать более чёткий фрагмент."
+            )
+            return
+        except ShazamServiceError as e:
+            logger.error(f"Shazam error for user {message.from_user.id}: {e}")
+            await status_msg.edit_text(
+                "❌ Сервис распознавания временно недоступен. Попробуй позже."
+            )
+            return
+
+        # Track-supplied strings flow into HTML-parsed messages — escape them.
+        # Bot uses ParseMode.HTML by default; titles like "AC/DC & Friends" or
+        # "<title>" would otherwise crash edit_text or render unintended markup.
+        safe_title = html.escape(title)
+        safe_artist = html.escape(artist) if artist else ""
+        display_label = f"{safe_artist} — {safe_title}" if safe_artist else safe_title
+
+        query = f"{artist} {title}".strip() if artist else title
+        await status_msg.edit_text(
+            f"🎵 Найдено: <b>{display_label}</b>\n"
+            f"🔍 Ищу на YouTube..."
+        )
+
+        # Search YouTube and pick the first result
+        try:
+            videos = youtube_service.search(query, max_results=1)
+        except Exception as e:
+            logger.error(f"YouTube search error for voice flow user {message.from_user.id}: {e}")
+            await status_msg.edit_text("❌ Ошибка поиска на YouTube. Попробуй позже.")
+            return
+
+        video_id = videos[0].get("id") if videos else None
+        if not video_id:
+            await status_msg.edit_text(
+                f"❌ Видео для трека <b>{display_label}</b> не найдено на YouTube."
+            )
+            return
+
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        await status_msg.edit_text(
+            f"🎵 <b>{display_label}</b>\n"
+            f"⏳ Проверяю видео..."
+        )
+
+        success = await download_and_send_audio(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            url=url,
+            status_msg=status_msg,
+            youtube_service=youtube_service,
+            db_service=db_service,
+        )
+
+        if success:
+            await asyncio.sleep(1)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Unexpected voice handler error for user {message.from_user.id}: {e}")
+        try:
+            await status_msg.edit_text("❌ Произошла ошибка. Попробуй позже.")
+        except Exception:
+            pass
+    finally:
+        if voice_path:
+            try:
+                voice_path.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"Could not delete voice file {voice_path}: {e}")
 
 
 @router.message(F.text)
@@ -462,160 +676,23 @@ async def handle_message(message: Message, youtube_service: YouTubeService, db_s
     # Clean URL from playlist and extra parameters
     url = clean_youtube_url(message.text.strip())
     logger.info(f"Cleaned URL: {url}")
-    audio_file_path = None
 
-    try:
-        # Send processing message
-        status_msg = await message.answer("⏳ Проверяю видео...")
+    status_msg = await message.answer("⏳ Проверяю видео...")
 
-        # Wait for available slot
-        if download_semaphore.locked():
-            await status_msg.edit_text("⏳ Очередь загрузки... Подожди немного.")
+    success = await download_and_send_audio(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        url=url,
+        status_msg=status_msg,
+        youtube_service=youtube_service,
+        db_service=db_service,
+    )
 
-        await download_semaphore.acquire()
-
-        # Check video duration
-        is_valid, duration = youtube_service.check_duration(url)
-
-        if not is_valid:
-            if duration:
-                minutes = duration // 60
-                await status_msg.edit_text(
-                    f"❌ Видео слишком длинное ({minutes} мин).\n"
-                    f"Максимальная длительность: 30 минут."
-                )
-            else:
-                await status_msg.edit_text(
-                    "❌ Не удалось определить длительность видео.\n"
-                    "Возможно, это прямая трансляция или премьера."
-                )
-            return
-
-        # Download audio
-        await status_msg.edit_text("⏳ Загружаю аудио...")
-        audio_file_path, video_title, audio_duration = youtube_service.download_and_convert(url)
-
-        # Check file size (Telegram limit is 50MB)
-        file_size = audio_file_path.stat().st_size
-        max_size = 50 * 1024 * 1024  # 50MB in bytes
-
-        if file_size > max_size:
-            await status_msg.edit_text(
-                f"❌ Аудио файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
-                f"Максимальный размер: 50 MB."
-            )
-            return
-
-        # Send audio file
-        await status_msg.edit_text("⏳ Отправляю аудио...")
-
-        # Get file extension
-        file_ext = audio_file_path.suffix
-        audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
-        await message.answer_audio(
-            audio=audio_file,
-            title=video_title,
-            duration=audio_duration
-        )
-
-        # Track successful download
-        try:
-            await db_service.add_download(
-                user_id=message.from_user.id,
-                url=url,
-                title=video_title,
-                file_size=file_size,
-                duration=audio_duration
-            )
-        except Exception as e:
-            logger.error(f"Failed to track download for user {message.from_user.id}: {e}")
-
-        # Wait a bit to ensure Telegram has read the file
+    if success:
         await asyncio.sleep(1)
-
-        # Delete both messages
         try:
             await status_msg.delete()
             await message.delete()
         except Exception as e:
             logger.warning(f"Could not delete messages: {e}")
-
-        logger.info(f"Successfully processed video for user {message.from_user.id}")
-
-    except VideoUnavailableError as e:
-        logger.warning(f"Video unavailable for user {message.from_user.id}: {e}")
-        try:
-            await db_service.add_error(
-                user_id=message.from_user.id,
-                url=url,
-                error_type="VideoUnavailableError",
-                error_message=str(e)
-            )
-        except Exception as db_error:
-            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
-        await message.answer(f"❌ {str(e)}")
-    except VideoRestrictedError as e:
-        logger.warning(f"Video restricted for user {message.from_user.id}: {e}")
-        try:
-            await db_service.add_error(
-                user_id=message.from_user.id,
-                url=url,
-                error_type="VideoRestrictedError",
-                error_message=str(e)
-            )
-        except Exception as db_error:
-            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
-        await message.answer(
-            f"❌ {str(e)}\n\n"
-            "💡 Попробуйте другое видео без ограничений."
-        )
-    except VideoDownloadError as e:
-        logger.warning(f"Video download error for user {message.from_user.id}: {e}")
-        try:
-            await db_service.add_error(
-                user_id=message.from_user.id,
-                url=url,
-                error_type="VideoDownloadError",
-                error_message=str(e)
-            )
-        except Exception as db_error:
-            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
-        await message.answer(
-            f"❌ {str(e)}\n\n"
-            "💡 Рекомендации:\n"
-            "• Попробуйте другое видео\n"
-            "• Убедитесь, что видео доступно публично\n"
-            "• Проверьте, что видео не защищено авторскими правами"
-        )
-    except YouTubeServiceError as e:
-        logger.error(f"YouTube service error for user {message.from_user.id}: {e}")
-        try:
-            await db_service.add_error(
-                user_id=message.from_user.id,
-                url=url,
-                error_type="YouTubeServiceError",
-                error_message=str(e)
-            )
-        except Exception as db_error:
-            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
-        await message.answer(f"❌ {str(e)}")
-    except Exception as e:
-        logger.error(f"Unexpected error processing video for user {message.from_user.id}: {e}")
-        try:
-            await db_service.add_error(
-                user_id=message.from_user.id,
-                url=url,
-                error_type="UnexpectedError",
-                error_message=str(e)
-            )
-        except Exception as db_error:
-            logger.error(f"Failed to track error for user {message.from_user.id}: {db_error}")
-        await message.answer(
-            "❌ Произошла непредвиденная ошибка.\n"
-            "Пожалуйста, попробуй другую ссылку или повтори попытку позже."
-        )
-    finally:
-        download_semaphore.release()
-        # Always cleanup the file
-        if audio_file_path:
-            youtube_service.cleanup_file(audio_file_path)

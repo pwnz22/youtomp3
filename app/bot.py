@@ -7,6 +7,7 @@ from aiogram.enums import ParseMode
 from app.config import Config
 from app.database import DatabaseService
 from app.handlers import router
+from app.services.shazam import ShazamService
 from app.services.youtube import YouTubeService
 
 
@@ -31,9 +32,13 @@ def create_dispatcher(config: Config, db_service: DatabaseService) -> Dispatcher
         api_key=config.youtube_api_key,
     )
 
+    # Create Shazam service instance
+    shazam_service = ShazamService()
+
     # Pass dependencies via workflow_data
     dp.workflow_data.update({
         "youtube_service": youtube_service,
+        "shazam_service": shazam_service,
         "db_service": db_service,
         "config": config,
     })
