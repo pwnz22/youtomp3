@@ -1,5 +1,4 @@
 import asyncio
-import html
 import logging
 import re
 import tempfile
@@ -120,7 +119,7 @@ async def download_and_send_audio(
 
     if download_semaphore.locked():
         try:
-            await status_msg.edit_text("⏳ Очередь загрузки... Подожди немного.")
+            await status_msg.edit_text("🕐 В очереди...")
         except Exception:
             pass
 
@@ -131,17 +130,15 @@ async def download_and_send_audio(
                 if duration:
                     minutes = duration // 60
                     await status_msg.edit_text(
-                        f"❌ Видео слишком длинное ({minutes} мин).\n"
-                        f"Максимальная длительность: 30 минут."
+                        f"❌ Трек слишком длинный ({minutes} мин).\n"
+                        f"Максимум: 30 минут."
                     )
                 else:
                     await status_msg.edit_text(
-                        "❌ Не удалось определить длительность видео.\n"
-                        "Возможно, это прямая трансляция или премьера."
+                        "❌ Не получилось обработать. Попробуй другой трек."
                     )
                 return False
 
-            await status_msg.edit_text("⏳ Загружаю аудио...")
             audio_file_path, video_title, audio_duration = (
                 youtube_service.download_and_convert(url)
             )
@@ -149,12 +146,12 @@ async def download_and_send_audio(
             file_size = audio_file_path.stat().st_size
             if file_size > MAX_AUDIO_FILE_SIZE:
                 await status_msg.edit_text(
-                    f"❌ Аудио файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
-                    f"Максимальный размер: 50 MB."
+                    f"❌ Файл слишком большой ({file_size / (1024 * 1024):.1f} MB).\n"
+                    f"Максимум: 50 MB."
                 )
                 return False
 
-            await status_msg.edit_text("⏳ Отправляю аудио...")
+            await status_msg.edit_text("📤 Отправляю...")
             file_ext = audio_file_path.suffix
             audio_file = FSInputFile(audio_file_path, filename=f"{video_title}{file_ext}")
             await bot.send_audio(
@@ -518,7 +515,7 @@ async def handle_download_callback(
 
     # Edit the search results message to show progress (edit_text removes reply_markup)
     status_msg = callback.message
-    await status_msg.edit_text("⏳ Проверяю видео...", reply_markup=None)
+    await status_msg.edit_text("🎵 Готовлю аудио...", reply_markup=None)
 
     success = await download_and_send_audio(
         bot=callback.bot,
@@ -564,7 +561,7 @@ async def handle_voice(
         )
         return
 
-    status_msg = await message.answer("🎧 Распознаю трек через Shazam...")
+    status_msg = await message.answer("🎧 Слушаю...")
 
     voice_path: Path | None = None
     try:
@@ -593,43 +590,30 @@ async def handle_voice(
         except ShazamServiceError as e:
             logger.error(f"Shazam error for user {message.from_user.id}: {e}")
             await status_msg.edit_text(
-                "❌ Сервис распознавания временно недоступен. Попробуй позже."
+                "❌ Что-то пошло не так. Попробуй позже."
             )
             return
 
-        # Track-supplied strings flow into HTML-parsed messages — escape them.
-        # Bot uses ParseMode.HTML by default; titles like "AC/DC & Friends" or
-        # "<title>" would otherwise crash edit_text or render unintended markup.
-        safe_title = html.escape(title)
-        safe_artist = html.escape(artist) if artist else ""
-        display_label = f"{safe_artist} — {safe_title}" if safe_artist else safe_title
+        await status_msg.edit_text("🎵 Готовлю аудио...")
 
         query = f"{artist} {title}".strip() if artist else title
-        await status_msg.edit_text(
-            f"🎵 Найдено: <b>{display_label}</b>\n"
-            f"🔍 Ищу на YouTube..."
-        )
 
         # Search YouTube and pick the first result
         try:
             videos = youtube_service.search(query, max_results=1)
         except Exception as e:
             logger.error(f"YouTube search error for voice flow user {message.from_user.id}: {e}")
-            await status_msg.edit_text("❌ Ошибка поиска на YouTube. Попробуй позже.")
+            await status_msg.edit_text("❌ Что-то пошло не так. Попробуй позже.")
             return
 
         video_id = videos[0].get("id") if videos else None
         if not video_id:
             await status_msg.edit_text(
-                f"❌ Видео для трека <b>{display_label}</b> не найдено на YouTube."
+                "🤷 Не нашёл подходящего трека.\nПопробуй другой фрагмент."
             )
             return
 
         url = f"https://www.youtube.com/watch?v={video_id}"
-        await status_msg.edit_text(
-            f"🎵 <b>{display_label}</b>\n"
-            f"⏳ Проверяю видео..."
-        )
 
         success = await download_and_send_audio(
             bot=message.bot,
@@ -677,7 +661,7 @@ async def handle_message(message: Message, youtube_service: YouTubeService, db_s
     url = clean_youtube_url(message.text.strip())
     logger.info(f"Cleaned URL: {url}")
 
-    status_msg = await message.answer("⏳ Проверяю видео...")
+    status_msg = await message.answer("🎵 Готовлю аудио...")
 
     success = await download_and_send_audio(
         bot=message.bot,
